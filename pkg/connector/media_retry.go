@@ -7,7 +7,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
-	"strings"
+	"sync/atomic"
 
 	"github.com/rs/zerolog"
 	"google.golang.org/protobuf/proto"
@@ -16,7 +16,6 @@ import (
 	"maunium.net/go/mautrix/bridgev2/database"
 	"maunium.net/go/mautrix/bridgev2/networkid"
 	"maunium.net/go/mautrix/event"
-	"maunium.net/go/mautrix/id"
 
 	"go.mau.fi/mautrix-gmessages/pkg/libgm/gmproto"
 )
@@ -37,32 +36,11 @@ var commandRetryMedia = &commands.FullHandler{
 }
 
 func retryMediaCommand(ce *commands.Event) {
-	target := ce.ReplyTo
-	if len(ce.Args) == 1 {
-		target = id.EventID(ce.Args[0])
-	}
-	if len(ce.Args) > 1 || !strings.HasPrefix(string(target), "$") {
-		ce.Reply("Usage: `$cmdprefix retry-media <Matrix event ID>`, or reply to the original message with `$cmdprefix retry-media`.")
-		return
-	}
-	stored, err := ce.Bridge.DB.Message.GetPartByMXID(ce.Ctx, target)
-	if err != nil {
-		ce.Reply("Failed to look up the stored message: %v", err)
-		return
-	} else if stored == nil || stored.Room != ce.Portal.PortalKey {
-		ce.Reply("The event is not a stored message in this portal. Use the original event ID in its own portal room.")
-		return
-	}
-	login, _, err := ce.Portal.FindPreferredLogin(ce.Ctx, ce.User, false)
-	if err != nil {
-		ce.Reply("An active login owned by you is required for this portal: %v", err)
+	stored, login := resolveMediaCommandTarget(ce)
+	if stored == nil {
 		return
 	}
 	client := login.Client.(*GMClient)
-	if _, err = client.ParseMessageID(stored.ID); err != nil {
-		ce.Reply("The stored message belongs to another Google Messages account.")
-		return
-	}
 	retry := &mediaRetryEvent{
 		client: client, key: stored.Room, messageID: stored.ID,
 		convert: client.convertGoogleMedia,
@@ -74,21 +52,22 @@ func retryMediaCommand(ce *commands.Event) {
 	}
 	ce.Reply("Queueing a pending-attachment retry behind earlier portal events. A completion notice will report the stored result.")
 	result := ce.Bridge.QueueRemoteEvent(login, retry)
-	if !result.Success || result.Ignored {
+	if (!result.Success || result.Ignored) && !retry.callbackRan.Load() {
 		ce.Reply("The attachment retry could not be queued. Check the bridge logs and retry after the portal is available.")
 	}
 }
 
 type mediaRetryEvent struct {
-	client     *GMClient
-	key        networkid.PortalKey
-	messageID  networkid.MessageID
-	convert    func(context.Context, *bridgev2.Portal, bridgev2.MatrixAPI, *gmproto.MediaContent) (*event.MessageEventContent, string, bool, error)
-	reply      func(context.Context, string)
-	selected   []networkid.PartID
-	converted  map[networkid.PartID]string
-	thumbnails map[networkid.PartID]bool
-	failure    error
+	client      *GMClient
+	key         networkid.PortalKey
+	messageID   networkid.MessageID
+	convert     func(context.Context, *bridgev2.Portal, bridgev2.MatrixAPI, *gmproto.MediaContent) (*event.MessageEventContent, string, bool, error)
+	reply       func(context.Context, string)
+	selected    []networkid.PartID
+	converted   map[networkid.PartID]string
+	thumbnails  map[networkid.PartID]bool
+	failure     error
+	callbackRan atomic.Bool
 }
 
 func (retry *mediaRetryEvent) GetType() bridgev2.RemoteEventType     { return bridgev2.RemoteEventEdit }
@@ -106,7 +85,7 @@ func (retry *mediaRetryEvent) AddLogContext(log zerolog.Context) zerolog.Context
 // protobuf decoding alone cannot distinguish messages with overlapping fields.
 func decodeSavedMessage(encoded, messageID, conversationID string, timestamp int64) (*gmproto.Message, error) {
 	if encoded == "" || len(encoded) >= 8192 {
-		return nil, errors.New("saved raw message data is unavailable; this command cannot refetch history or request files from the phone")
+		return nil, errors.New("saved raw message data is unavailable; the original first part must contain raw_debug_data before an attachment command can run")
 	}
 	raw, err := base64.StdEncoding.DecodeString(encoded)
 	if err != nil {
@@ -195,32 +174,7 @@ func (retry *mediaRetryEvent) ConvertEdit(ctx context.Context, portal *bridgev2.
 	if !DBMessages(existing).HasPendingMedia() {
 		return nil, errors.New("this message has no pending attachments")
 	}
-	var main *database.Message
-	for _, part := range existing {
-		if part.PartID == "" {
-			main = part
-		}
-	}
-	if main == nil || main.Room != retry.key {
-		return nil, errors.New("the stored message has no original first part in this portal")
-	}
-	messageID, err := retry.client.ParseMessageID(retry.messageID)
-	if err != nil {
-		return nil, err
-	}
-	conversationID, err := retry.client.ParsePortalID(portal.ID)
-	if err != nil {
-		return nil, err
-	}
-	original, err := intent.GetEvent(ctx, portal.MXID, main.MXID)
-	if err != nil {
-		return nil, fmt.Errorf("cannot read the original Matrix event and saved raw data: %w", err)
-	}
-	if original.ID != main.MXID || original.RoomID != portal.MXID || original.Sender != main.SenderMXID || original.Type != event.EventMessage {
-		return nil, errors.New("the original Matrix event does not match the stored message")
-	}
-	encoded, _ := original.Content.Raw[rawMessageDataKey].(string)
-	message, err := decodeSavedMessage(encoded, messageID, conversationID, main.Timestamp.UnixMicro())
+	main, message, encoded, err := retry.client.loadSavedMediaMessage(ctx, portal, intent, retry.messageID, existing)
 	if err != nil {
 		return nil, err
 	}
@@ -283,6 +237,7 @@ func (retry *mediaRetryEvent) ConvertEdit(ctx context.Context, portal *bridgev2.
 }
 
 func (retry *mediaRetryEvent) PostHandle(ctx context.Context, portal *bridgev2.Portal) {
+	retry.callbackRan.Store(true)
 	if len(retry.selected) == 0 {
 		if retry.failure != nil {
 			retry.reply(ctx, "Attachment retry failed: "+retry.failure.Error())

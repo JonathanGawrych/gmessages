@@ -47,6 +47,7 @@ func (gc *GMConnector) Init(bridge *bridgev2.Bridge) {
 	gc.DB = gmdb.New(bridge.DB.Database, bridge.Log.With().Str("db_section", "gmessages").Logger())
 	gc.br = bridge
 	bridge.Commands.(*commands.Processor).AddHandler(commandRetryMedia)
+	bridge.Commands.(*commands.Processor).AddHandler(commandRequestMedia)
 
 	util.BrowserDetailsMessage.OS = gc.Config.DeviceMeta.OS
 	browserVal, ok := gmproto.BrowserType_value[gc.Config.DeviceMeta.Browser]

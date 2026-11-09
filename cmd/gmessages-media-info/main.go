@@ -5,10 +5,15 @@
 package main
 
 import (
+	"bytes"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"image"
+	_ "image/gif"
+	_ "image/jpeg"
+	_ "image/png"
 	"io"
 	"os"
 	"strings"
@@ -19,12 +24,15 @@ import (
 )
 
 type mediaPresence struct {
-	PartID       bool `json:"has_part_id"`
-	FullID       bool `json:"has_full_media_id"`
-	ThumbnailID  bool `json:"has_thumbnail_media_id"`
-	FullKey      bool `json:"has_full_media_key"`
-	ThumbnailKey bool `json:"has_thumbnail_media_key"`
-	InlineBytes  int  `json:"inline_bytes"`
+	PartID       bool   `json:"has_part_id"`
+	FullID       bool   `json:"has_full_media_id"`
+	ThumbnailID  bool   `json:"has_thumbnail_media_id"`
+	FullKey      bool   `json:"has_full_media_key"`
+	ThumbnailKey bool   `json:"has_thumbnail_media_key"`
+	InlineBytes  int    `json:"inline_bytes"`
+	InlineFormat string `json:"inline_format,omitempty"`
+	InlineWidth  int    `json:"inline_width,omitempty"`
+	InlineHeight int    `json:"inline_height,omitempty"`
 }
 
 type mediaSummary struct {
@@ -59,11 +67,17 @@ func inspectSavedMedia(encoded string) (*mediaSummary, error) {
 	for _, message := range messages {
 		for _, part := range message.MessageInfo {
 			if media := part.GetMediaContent(); media != nil {
-				summary.Attachments = append(summary.Attachments, mediaPresence{
+				presence := mediaPresence{
 					PartID: part.GetActionMessageID() != "", FullID: media.MediaID != "", ThumbnailID: media.ThumbnailMediaID != "",
 					FullKey: len(media.DecryptionKey) > 0, ThumbnailKey: len(media.ThumbnailDecryptionKey) > 0,
 					InlineBytes: len(media.MediaData),
-				})
+				}
+				if dimensions, format, err := image.DecodeConfig(bytes.NewReader(media.MediaData)); err == nil {
+					presence.InlineFormat = format
+					presence.InlineWidth = dimensions.Width
+					presence.InlineHeight = dimensions.Height
+				}
+				summary.Attachments = append(summary.Attachments, presence)
 			}
 		}
 	}
