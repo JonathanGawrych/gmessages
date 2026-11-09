@@ -22,6 +22,7 @@ import (
 	"math"
 
 	"maunium.net/go/mautrix/bridgev2"
+	"maunium.net/go/mautrix/bridgev2/commands"
 
 	"go.mau.fi/mautrix-gmessages/pkg/connector/gmdb"
 	"go.mau.fi/mautrix-gmessages/pkg/libgm/gmproto"
@@ -45,6 +46,7 @@ func (gc *GMConnector) Init(bridge *bridgev2.Bridge) {
 	bridge.Log.Info().Msg("Disabled automatic portal handler backgrounding to preserve history ordering")
 	gc.DB = gmdb.New(bridge.DB.Database, bridge.Log.With().Str("db_section", "gmessages").Logger())
 	gc.br = bridge
+	bridge.Commands.(*commands.Processor).AddHandler(commandRetryMedia)
 
 	util.BrowserDetailsMessage.OS = gc.Config.DeviceMeta.OS
 	browserVal, ok := gmproto.BrowserType_value[gc.Config.DeviceMeta.Browser]

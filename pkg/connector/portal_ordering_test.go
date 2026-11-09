@@ -17,6 +17,7 @@ import (
 	"go.mau.fi/util/dbutil"
 	"maunium.net/go/mautrix/bridgev2"
 	"maunium.net/go/mautrix/bridgev2/bridgeconfig"
+	"maunium.net/go/mautrix/bridgev2/commands"
 	"maunium.net/go/mautrix/bridgev2/database"
 	"maunium.net/go/mautrix/bridgev2/networkid"
 	"maunium.net/go/mautrix/id"
@@ -79,7 +80,7 @@ func TestLongPortalHandlerRemainsSerialized(t *testing.T) {
 				// Initialization runs after framework environment configuration and
 				// before loading portals, so it must replace a configured timeout.
 				bridgev2.EventHandlingTimeoutTicks = 1
-				bridge := bridgev2.NewBridge("fixture", wrapped, zerolog.Nop(), &bridgeconfig.BridgeConfig{}, &orderingTestMatrix{}, network, func(*bridgev2.Bridge) bridgev2.CommandProcessor { return nil })
+				bridge := bridgev2.NewBridge("fixture", wrapped, zerolog.Nop(), &bridgeconfig.BridgeConfig{}, &orderingTestMatrix{}, network, commands.NewProcessor)
 				bridge.BackgroundCtx = ctx
 				if bridgev2.EventHandlingTimeoutTicks != math.MaxInt {
 					t.Fatal("connector did not configure serialized handling")
