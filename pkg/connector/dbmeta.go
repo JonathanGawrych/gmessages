@@ -55,6 +55,8 @@ func (gc *GMConnector) GetDBMetaTypes() database.MetaTypes {
 }
 
 type PortalMetadata struct {
+	ForwardHistory *ForwardHistoryMetadata `json:"forward_history,omitempty"`
+
 	Type     gmproto.ConversationType     `json:"type"`
 	SendMode gmproto.ConversationSendMode `json:"send_mode"`
 	ForceRCS bool                         `json:"force_rcs"`

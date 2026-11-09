@@ -18,6 +18,8 @@ package connector
 
 import (
 	"context"
+	"errors"
+	"math"
 
 	"maunium.net/go/mautrix/bridgev2"
 
@@ -35,6 +37,12 @@ type GMConnector struct {
 var _ bridgev2.NetworkConnector = (*GMConnector)(nil)
 
 func (gc *GMConnector) Init(bridge *bridgev2.Bridge) {
+	// v0.30.0 otherwise backgrounds a handler after five minutes, allowing later
+	// events to overtake history that is still fetching, converting or sending.
+	// Set this once before portal workers start; changing it during imports races
+	// with every portal's timeout loop. The framework has no per-event override.
+	bridgev2.EventHandlingTimeoutTicks = math.MaxInt
+	bridge.Log.Info().Msg("Disabled automatic portal handler backgrounding to preserve history ordering")
 	gc.DB = gmdb.New(bridge.DB.Database, bridge.Log.With().Str("db_section", "gmessages").Logger())
 	gc.br = bridge
 
@@ -54,6 +62,9 @@ func (gc *GMConnector) Init(bridge *bridgev2.Bridge) {
 }
 
 func (gc *GMConnector) Start(ctx context.Context) error {
+	if gc.br.Config.AsyncEvents {
+		return errors.New("bridge.async_events must be false to preserve Google Messages event and history ordering")
+	}
 	return gc.DB.Upgrade(ctx)
 }
 

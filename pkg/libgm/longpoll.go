@@ -292,16 +292,24 @@ func tryReadBody(resp io.ReadCloser) []byte {
 	return data
 }
 
-func (c *Client) doLongPoll(loggedIn, background bool, onFirstConnect func()) bool {
-	c.listenID++
-	listenID := c.listenID
+func (c *Client) doLongPoll(loggedIn, background bool, onFirstConnect func(), durableHandler *incomingRPCHandler) bool {
+	finish, err := durableHandler.begin()
+	if err != nil {
+		return false
+	}
+	defer finish()
+	listenID := c.listenID.Add(1)
 	listenReqID := uuid.NewString()
 
-	log := c.Logger.With().Int("listen_id", listenID).Logger()
+	log := c.Logger.With().Int64("listen_id", listenID).Logger()
 	defer func() {
 		log.Debug().Msg("Long polling stopped")
 	}()
-	ctx := log.WithContext(context.TODO())
+	ctx := context.Background()
+	if durableHandler != nil && durableHandler.dispatcher != nil {
+		ctx = durableHandler.dispatcher.ctx
+	}
+	ctx = log.WithContext(ctx)
 	log.Debug().Str("listen_uuid", listenReqID).Msg("Long polling starting")
 
 	if loggedIn {
@@ -317,8 +325,11 @@ func (c *Client) doLongPoll(loggedIn, background bool, onFirstConnect func()) bo
 	}
 
 	errorCount := 1
-	for c.listenID == listenID {
-		err := c.refreshAuthToken(nil)
+	for c.listenID.Load() == listenID && ctx.Err() == nil {
+		err := c.refreshAuthToken(ctx, nil)
+		if ctx.Err() != nil {
+			return false
+		}
 		if err != nil {
 			if exhttp.IsNetworkError(err) {
 				if loggedIn {
@@ -333,7 +344,11 @@ func (c *Client) doLongPoll(loggedIn, background bool, onFirstConnect func()) bo
 					sleepSeconds = errorCount * 2
 				}
 				log.Err(err).Int("sleep_seconds", sleepSeconds).Msg("Error refreshing auth token, retrying in a while")
-				time.Sleep(time.Duration(sleepSeconds) * time.Second)
+				select {
+				case <-ctx.Done():
+					return false
+				case <-time.After(time.Duration(sleepSeconds) * time.Second):
+				}
 				continue
 			}
 			log.Err(err).Msg("Error refreshing auth token")
@@ -359,6 +374,12 @@ func (c *Client) doLongPoll(loggedIn, background bool, onFirstConnect func()) bo
 			url = util.ReceiveMessagesURLGoogle
 		}
 		resp, err := c.makeProtobufHTTPRequestContext(ctx, url, payload, ContentTypePBLite, true)
+		if ctx.Err() != nil {
+			if resp != nil {
+				_ = resp.Body.Close()
+			}
+			return false
+		}
 		if err != nil {
 			if loggedIn {
 				c.triggerEvent(&events.ListenTemporaryError{Error: err})
@@ -372,7 +393,11 @@ func (c *Client) doLongPoll(loggedIn, background bool, onFirstConnect func()) bo
 				sleepSeconds = errorCount * 2
 			}
 			log.Err(err).Int("sleep_seconds", sleepSeconds).Msg("Error making listen request, retrying in a while")
-			time.Sleep(time.Duration(sleepSeconds) * time.Second)
+			select {
+			case <-ctx.Done():
+				return false
+			case <-time.After(time.Duration(sleepSeconds) * time.Second):
+			}
 			continue
 		}
 		if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
@@ -403,7 +428,11 @@ func (c *Client) doLongPoll(loggedIn, background bool, onFirstConnect func()) bo
 				Int("statusCode", resp.StatusCode).
 				Int("sleep_seconds", sleepSeconds).
 				Msg("Error in long polling, retrying in a while")
-			time.Sleep(time.Duration(sleepSeconds) * time.Second)
+			select {
+			case <-ctx.Done():
+				return false
+			case <-time.After(time.Duration(sleepSeconds) * time.Second):
+			}
 			continue
 		}
 		if errorCount > 0 {
@@ -413,13 +442,14 @@ func (c *Client) doLongPoll(loggedIn, background bool, onFirstConnect func()) bo
 			}
 		}
 		log.Debug().Int("statusCode", resp.StatusCode).Msg("Long polling opened")
-		c.longPollingConn = resp.Body
+		connection := &longPollingConnection{Closer: resp.Body}
+		c.longPollingConn.Store(connection)
 		if onFirstConnect != nil {
 			go onFirstConnect()
 			onFirstConnect = nil
 		}
-		cleanClose := c.readLongPoll(&log, resp.Body, background)
-		c.longPollingConn = nil
+		cleanClose := c.readLongPoll(&log, resp.Body, background, durableHandler)
+		c.longPollingConn.CompareAndSwap(connection, nil)
 		if background {
 			return cleanClose
 		}
@@ -427,9 +457,20 @@ func (c *Client) doLongPoll(loggedIn, background bool, onFirstConnect func()) bo
 	return true
 }
 
-func (c *Client) readLongPoll(log *zerolog.Logger, rc io.ReadCloser, background bool) bool {
+func (c *Client) readLongPoll(log *zerolog.Logger, rc io.ReadCloser, background bool, durableHandler *incomingRPCHandler) bool {
+	// A retired HTTP reader may still hold a buffered RPC when reconnect installs
+	// a new dispatcher. Keep its original hook so that cancellation rejects it.
 	defer rc.Close()
-	c.disconnecting = false
+	finish, err := durableHandler.begin()
+	if err != nil {
+		return false
+	}
+	defer finish()
+	if durableHandler != nil && durableHandler.dispatcher != nil {
+		stopClose := context.AfterFunc(durableHandler.dispatcher.ctx, func() { _ = rc.Close() })
+		defer stopClose()
+	}
+	c.disconnecting.Store(false)
 	reader := bufio.NewReader(rc)
 	buf := make([]byte, 2621440)
 	var accumulatedData []byte
@@ -455,9 +496,15 @@ func (c *Client) readLongPoll(log *zerolog.Logger, rc io.ReadCloser, background 
 	}
 	if background {
 		closeIn = time.NewTimer(10 * time.Second)
+		timerDone := make(chan struct{})
+		defer close(timerDone)
+		defer closeIn.Stop()
 		go func() {
-			<-closeIn.C
-			c.closeLongPolling()
+			select {
+			case <-closeIn.C:
+				_ = rc.Close()
+			case <-timerDone:
+			}
 		}()
 	}
 	var expectEOF bool
@@ -465,7 +512,7 @@ func (c *Client) readLongPoll(log *zerolog.Logger, rc io.ReadCloser, background 
 		n, err = reader.Read(buf)
 		if err != nil {
 			var logEvt *zerolog.Event
-			if (errors.Is(err, io.EOF) && expectEOF) || c.disconnecting {
+			if (errors.Is(err, io.EOF) && expectEOF) || c.disconnecting.Load() {
 				logEvt = log.Trace()
 			} else {
 				logEvt = log.Warn()
@@ -500,10 +547,21 @@ func (c *Client) readLongPoll(log *zerolog.Logger, rc io.ReadCloser, background 
 		}
 		switch {
 		case msg.GetData() != nil:
-			c.HandleRPCMsg(msg.GetData())
+			if err = c.handleRPCMsg(msg.GetData(), durableHandler); err != nil {
+				if durableHandler.cancelled() {
+					log.Debug().Msg("Stopped retired incoming RPC reader")
+					return false
+				}
+				log.Error().Err(err).Msg("Incoming RPC was not acknowledged; reconnecting for redelivery")
+				c.triggerEvent(&events.ListenTemporaryError{Error: err})
+				return false
+			}
 			receivedEvents = true
 			onRead()
 		case msg.GetAck() != nil:
+			if durableHandler.cancelled() {
+				return false
+			}
 			level := zerolog.TraceLevel
 			if msg.GetAck().GetCount() > 0 {
 				level = zerolog.DebugLevel
@@ -523,11 +581,10 @@ func (c *Client) readLongPoll(log *zerolog.Logger, rc io.ReadCloser, background 
 }
 
 func (c *Client) closeLongPolling() {
-	if conn := c.longPollingConn; conn != nil {
-		c.Logger.Debug().Int("current_listen_id", c.listenID).Msg("Closing long polling connection manually")
-		c.listenID++
-		c.disconnecting = true
+	listenID := c.listenID.Add(1)
+	if conn := c.longPollingConn.Swap(nil); conn != nil {
+		c.Logger.Debug().Int64("current_listen_id", listenID-1).Msg("Closing long polling connection manually")
+		c.disconnecting.Store(true)
 		_ = conn.Close()
-		c.longPollingConn = nil
 	}
 }

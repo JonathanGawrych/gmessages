@@ -46,6 +46,24 @@ import (
 )
 
 func (gc *GMClient) handleGMEvent(rawEvt any) {
+	if err := gc.handleGMEventWithError(rawEvt); err != nil {
+		gc.UserLogin.Log.Error().Err(err).Msg("Failed to handle Google Messages event")
+	}
+}
+
+func (gc *GMClient) handleGMEventWithError(rawEvt any) error {
+	// Shared login state is serialized, but a full portal queue must not hold
+	// this lock and prevent another conversation or control event from running.
+	dispatch := gc.prepareGMEvent(rawEvt)
+	if dispatch != nil {
+		return dispatch()
+	}
+	return nil
+}
+
+func (gc *GMClient) prepareGMEvent(rawEvt any) func() error {
+	gc.eventHandlerLock.Lock()
+	defer gc.eventHandlerLock.Unlock()
 	log := gc.UserLogin.Log.With().Str("action", "handle gmessages event").Logger()
 	ctx := log.WithContext(context.TODO())
 	switch evt := rawEvt.(type) {
@@ -145,7 +163,7 @@ func (gc *GMClient) handleGMEvent(rawEvt any) {
 		gc.chatInfoCache.Set(evt.ConversationID, evt)
 		gc.noDataReceivedRecently = false
 		gc.lastDataReceived = time.Now()
-		go gc.syncConversation(ctx, evt, "event")
+		return func() error { return gc.syncConversation(ctx, evt, "event") }
 	//case *gmproto.Message:
 	case *libgm.WrappedMessage:
 		gc.noDataReceivedRecently = false
@@ -172,10 +190,12 @@ func (gc *GMClient) handleGMEvent(rawEvt any) {
 				Bool("syncing_conversations", gc.syncingConversations.Load()).
 				Msg("Ignoring MESSAGE_DELETED during resync")
 		} else {
-			gc.Main.br.QueueRemoteEvent(gc.UserLogin, &MessageEvent{
-				WrappedMessage: evt,
-				g:              gc,
-			})
+			return func() error {
+				return gc.queueIncomingEvent(&MessageEvent{
+					WrappedMessage: evt,
+					g:              gc,
+				})
+			}
 		}
 	case *gmproto.TypingData:
 		timeout := 15 * time.Second
@@ -188,7 +208,7 @@ func (gc *GMClient) handleGMEvent(rawEvt any) {
 				Str("conversation_id", evt.GetConversationID()).
 				Str("number", evt.GetUser().GetNumber()).
 				Msg("Didn't find cached conversation info to find participant ID for typing notification")
-			return
+			return nil
 		}
 		participantID := getPhoneNumberParticipantID(chatInfo, evt.GetUser().GetNumber())
 		if participantID == "" {
@@ -196,23 +216,25 @@ func (gc *GMClient) handleGMEvent(rawEvt any) {
 				Str("conversation_id", evt.GetConversationID()).
 				Str("number", evt.GetUser().GetNumber()).
 				Msg("Didn't find participant ID for typing notification")
-			return
+			return nil
 		}
-		gc.Main.br.QueueRemoteEvent(gc.UserLogin, &simplevent.Typing{
-			EventMeta: simplevent.EventMeta{
-				Type: bridgev2.RemoteEventTyping,
-				LogContext: func(c zerolog.Context) zerolog.Context {
-					return c.
-						Str("conversation_id", evt.GetConversationID()).
-						Str("participant_id", participantID).
-						Str("number", evt.GetUser().GetNumber())
+		return func() error {
+			return gc.queueIncomingEvent(&simplevent.Typing{
+				EventMeta: simplevent.EventMeta{
+					Type: bridgev2.RemoteEventTyping,
+					LogContext: func(c zerolog.Context) zerolog.Context {
+						return c.
+							Str("conversation_id", evt.GetConversationID()).
+							Str("participant_id", participantID).
+							Str("number", evt.GetUser().GetNumber())
+					},
+					PortalKey: gc.MakePortalKey(evt.ConversationID),
+					Sender:    gc.makeEventSender("", participantID, false, false),
 				},
-				PortalKey: gc.MakePortalKey(evt.ConversationID),
-				Sender:    gc.makeEventSender("", participantID, false, false),
-			},
-			Timeout: timeout,
-			Type:    bridgev2.TypingTypeText,
-		})
+				Timeout: timeout,
+				Type:    bridgev2.TypingTypeText,
+			})
+		}
 	case *gmproto.UserAlertEvent:
 		gc.handleUserAlert(ctx, evt)
 	case *gmproto.Settings:
@@ -231,6 +253,7 @@ func (gc *GMClient) handleGMEvent(rawEvt any) {
 	default:
 		log.Trace().Any("data", evt).Type("data_type", evt).Msg("Unknown event")
 	}
+	return nil
 }
 
 func (gc *GMClient) handleAccountChange(ctx context.Context, v *events.AccountChange) {

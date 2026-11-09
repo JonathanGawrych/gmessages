@@ -21,7 +21,7 @@ func (c *Client) StartLogin() (string, error) {
 		return "", err
 	}
 	c.updateTachyonAuthToken(registered.GetAuthKeyData())
-	go c.doLongPoll(false, false, nil)
+	go c.doLongPoll(false, false, nil, c.incomingRPCHandler.Load())
 	qr, err := c.GenerateQRCodeData(registered.GetPairingKey())
 	if err != nil {
 		return "", fmt.Errorf("failed to generate QR code: %w", err)
@@ -48,7 +48,7 @@ func (c *Client) handlePairingEvent(msg *IncomingRPCMessage) {
 	case *gmproto.RPCPairData_Paired:
 		c.completePairing(evt.Paired)
 	case *gmproto.RPCPairData_Revoked:
-		c.triggerEvent(evt.Revoked)
+		msg.triggerEvent(c, evt.Revoked)
 	default:
 		c.Logger.Debug().Any("evt", evt).Msg("Unknown pair event type")
 	}

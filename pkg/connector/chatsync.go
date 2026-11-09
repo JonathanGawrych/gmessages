@@ -61,7 +61,10 @@ func (gc *GMClient) SyncConversations(ctx context.Context, lastDataReceived time
 	}
 	for _, conv := range resp.GetConversations() {
 		gc.chatInfoCache.GetOrSet(conv.ConversationID, conv)
-		gc.syncConversation(ctx, conv, "sync")
+		if err := gc.syncConversation(ctx, conv, "sync"); err != nil {
+			log.Error().Err(err).Msg("Failed to enqueue conversation sync")
+			return
+		}
 	}
 }
 
@@ -95,7 +98,7 @@ func (gc *GMClient) syncConversationMeta(v *gmproto.Conversation) (meta *convers
 	return
 }
 
-func (gc *GMClient) syncConversation(ctx context.Context, v *gmproto.Conversation, source string) {
+func (gc *GMClient) syncConversation(ctx context.Context, v *gmproto.Conversation, source string) error {
 	meta, suspiciousUnmarkedSpam := gc.syncConversationMeta(v)
 
 	log := zerolog.Ctx(ctx).With().
@@ -110,7 +113,7 @@ func (gc *GMClient) syncConversation(ctx context.Context, v *gmproto.Conversatio
 	if suspiciousUnmarkedSpam {
 		log.Debug().Any("conversation_data", convCopy).
 			Msg("Dropping conversation update due to suspected race condition with spam flag")
-		return
+		return nil
 	}
 	log.Debug().Any("conversation_data", convCopy).Msg("Got conversation update")
 	evt := &GMChatResync{
@@ -130,11 +133,13 @@ func (gc *GMClient) syncConversation(ctx context.Context, v *gmproto.Conversatio
 			ReadUpTo:   meta.readUpToTS,
 		}
 	}
-	gc.Main.br.QueueRemoteEvent(gc.UserLogin, evt)
+	if err := gc.queueIncomingEvent(evt); err != nil {
+		return err
+	}
 	switch v.Status {
 	case gmproto.ConversationStatus_SPAM_FOLDER, gmproto.ConversationStatus_BLOCKED_FOLDER, gmproto.ConversationStatus_DELETED:
 		// Don't send read/backfill events if the chat is being deleted
-		return
+		return nil
 	}
 	if !evt.AllowBackfill {
 		backfillEvt := &GMChatResync{
@@ -166,13 +171,15 @@ func (gc *GMClient) syncConversation(ctx context.Context, v *gmproto.Conversatio
 			}
 		}()
 	} else if markReadEvt != nil {
-		gc.Main.br.QueueRemoteEvent(gc.UserLogin, markReadEvt)
+		return gc.queueIncomingEvent(markReadEvt)
 	}
+	return nil
 }
 
 type GMChatResync struct {
-	g    *GMClient
-	Conv *gmproto.Conversation
+	g      *GMClient
+	Conv   *gmproto.Conversation
+	portal *bridgev2.Portal
 
 	AllowBackfill bool
 	OnlyBackfill  bool
@@ -228,31 +235,20 @@ func (evt *GMChatResync) GetSender() bridgev2.EventSender {
 }
 
 func (evt *GMChatResync) GetChatInfo(ctx context.Context, portal *bridgev2.Portal) (*bridgev2.ChatInfo, error) {
+	evt.portal = portal
 	if evt.OnlyBackfill {
 		return nil, nil
 	}
 	return evt.g.wrapChatInfo(ctx, evt.Conv)
 }
 
-func (evt *GMChatResync) CheckNeedsBackfill(ctx context.Context, latestMessage *database.Message) (bool, error) {
+func (evt *GMChatResync) CheckNeedsBackfill(ctx context.Context, _ *database.Message) (bool, error) {
 	if !evt.AllowBackfill {
 		return false, nil
 	}
-	needsBackfill := evt.Conv.LastMessageTimestamp != 0 && (latestMessage == nil ||
-		(time.UnixMicro(evt.Conv.LastMessageTimestamp).After(latestMessage.Timestamp) &&
-			evt.g.MakeMessageID(evt.Conv.LatestMessageID) != latestMessage.ID))
-	if !needsBackfill {
-		return false, nil
-	}
-	logEvt := zerolog.Ctx(ctx).Debug().
-		Int64("conv_last_message_ts", evt.Conv.LastMessageTimestamp).
-		Str("conv_latest_message_id", evt.Conv.LatestMessageID)
-	if latestMessage != nil {
-		logEvt.Time("bridged_latest_message_ts", latestMessage.Timestamp).
-			Str("bridged_latest_message_id", string(latestMessage.ID))
-	}
-	logEvt.Msg("Chat needs backfill")
-	return true, nil
+	// Catch-up uses the last completed history position, independently of live message delivery.
+	// Returning false prevents the framework from repeating it with the latest live message as anchor.
+	return false, evt.g.syncForwardHistory(ctx, evt.portal, evt.Conv)
 }
 
 func (evt *GMChatResync) DeleteOnlyForMe() bool {

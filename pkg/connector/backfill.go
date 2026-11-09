@@ -62,6 +62,18 @@ func (gc *GMClient) FetchMessages(ctx context.Context, params bridgev2.FetchMess
 	if err != nil {
 		return nil, err
 	}
+	if params.Forward {
+		prepared, err := gc.prepareForwardHistory(ctx, params.Portal, convID, params.Count)
+		if err != nil {
+			return nil, err
+		}
+		prepared.response.CompleteCallback = func() {
+			if err := prepared.complete(ctx); err != nil {
+				zerolog.Ctx(ctx).Error().Err(err).Msg("Failed to complete forward history; pending history retained")
+			}
+		}
+		return prepared.response, nil
+	}
 	var cursor, anchorMsgCursor *gmproto.Cursor
 	if params.Cursor != "" {
 		cursor, _ = parsePaginationCursor(params.Cursor)

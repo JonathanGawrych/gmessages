@@ -111,15 +111,18 @@ type updateDedupItem struct {
 	hash [32]byte
 }
 
-type Client struct {
-	Logger         zerolog.Logger
-	evHandler      EventHandler
-	sessionHandler *SessionHandler
+type longPollingConnection struct{ io.Closer }
 
-	longPollingConn io.Closer
-	listenID        int
+type Client struct {
+	Logger             zerolog.Logger
+	evHandler          EventHandler
+	sessionHandler     *SessionHandler
+	incomingRPCHandler atomic.Pointer[incomingRPCHandler]
+
+	longPollingConn atomic.Pointer[longPollingConnection]
+	listenID        atomic.Int64
 	skipCount       int
-	disconnecting   bool
+	disconnecting   atomic.Bool
 
 	pingInterval             time.Duration
 	alertTimeoutCount        int
@@ -128,8 +131,9 @@ type Client struct {
 	nextDataReceiveCheck     time.Time
 	nextDataReceiveCheckLock sync.Mutex
 
-	recentUpdates    [8]updateDedupItem
-	recentUpdatesPtr int
+	recentUpdates     [8]updateDedupItem
+	recentUpdatesPtr  int
+	recentUpdatesLock sync.Mutex
 
 	conversationsFetchedOnce bool
 
@@ -189,6 +193,16 @@ func (c *Client) SetEventHandler(eventHandler EventHandler) {
 	c.evHandler = eventHandler
 }
 
+// SetIncomingRPCDispatcher binds incoming readers to a durable dispatcher and its
+// cancellation lifetime. A committed enqueue allows acknowledgement to Google.
+func (c *Client) SetIncomingRPCDispatcher(dispatcher *IncomingRPCDispatcher) {
+	if dispatcher == nil {
+		c.incomingRPCHandler.Store(nil)
+	} else {
+		c.incomingRPCHandler.Store(&incomingRPCHandler{dispatcher: dispatcher, enqueue: dispatcher.Enqueue})
+	}
+}
+
 func (c *Client) SetPingInterval(interval time.Duration) {
 	if interval >= 1*time.Minute && interval < 4*time.Hour {
 		c.pingInterval = interval
@@ -227,7 +241,7 @@ func (c *Client) Connect() error {
 		return fmt.Errorf("not logged in")
 	}
 
-	err := c.refreshAuthToken(nil)
+	err := c.refreshAuthToken(context.TODO(), nil)
 	if err != nil {
 		return fmt.Errorf("failed to refresh auth token: %w", err)
 	}
@@ -238,7 +252,7 @@ func (c *Client) Connect() error {
 	//	return fmt.Errorf("failed to get web encryption key: %w", err)
 	//}
 	//c.updateWebEncryptionKey(webEncryptionKeyResponse.GetKey())
-	go c.doLongPoll(true, false, c.postConnect)
+	go c.doLongPoll(true, false, c.postConnect, c.incomingRPCHandler.Load())
 	c.sessionHandler.startAckInterval()
 	return nil
 }
@@ -249,7 +263,7 @@ func (c *Client) ConnectBackground() error {
 	} else if c.AuthData.Browser == nil {
 		return fmt.Errorf("not logged in")
 	}
-	cleanExit := c.doLongPoll(true, true, nil)
+	cleanExit := c.doLongPoll(true, true, nil, c.incomingRPCHandler.Load())
 	c.sessionHandler.sendAckRequest()
 	if !cleanExit {
 		return fmt.Errorf("polling exited uncleanly")
@@ -312,7 +326,7 @@ func (c *Client) Disconnect() {
 
 func (c *Client) IsConnected() bool {
 	// TODO add better check (longPollingConn is set to nil while the polling reconnects)
-	return c.longPollingConn != nil
+	return c.longPollingConn.Load() != nil
 }
 
 func (c *Client) IsLoggedIn() bool {
@@ -413,7 +427,7 @@ type PushKeys struct {
 
 func (c *Client) RegisterPush(ctx context.Context, keys *PushKeys) error {
 	if c.PushKeys == nil || c.PushKeys.URL != keys.URL {
-		err := c.refreshAuthToken(keys)
+		err := c.refreshAuthToken(ctx, keys)
 		if err != nil {
 			return fmt.Errorf("failed to refresh auth token: %w", err)
 		}
@@ -430,7 +444,7 @@ func (c *Client) RegisterPush(ctx context.Context, keys *PushKeys) error {
 	return nil
 }
 
-func (c *Client) refreshAuthToken(pushKeyOverride *PushKeys) error {
+func (c *Client) refreshAuthToken(ctx context.Context, pushKeyOverride *PushKeys) error {
 	if c.AuthData.Browser == nil || (time.Until(c.AuthData.TachyonExpiry) > RefreshTachyonBuffer && pushKeyOverride == nil) {
 		return nil
 	}
@@ -484,7 +498,7 @@ func (c *Client) refreshAuthToken(pushKeyOverride *PushKeys) error {
 	}
 
 	resp, err := typedHTTPResponse[*gmproto.RegisterRefreshResponse](
-		c.makeProtobufHTTPRequest(util.RegisterRefreshURL, payload, ContentTypePBLite),
+		c.makeProtobufHTTPRequestContext(ctx, util.RegisterRefreshURL, payload, ContentTypePBLite, false),
 	)
 	if err != nil {
 		return err

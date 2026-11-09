@@ -43,10 +43,13 @@ type conversationMeta struct {
 }
 
 type GMClient struct {
-	Main      *GMConnector
-	UserLogin *bridgev2.UserLogin
-	Client    *libgm.Client
-	Meta      *UserLoginMetadata
+	Main             *GMConnector
+	UserLogin        *bridgev2.UserLogin
+	Client           *libgm.Client
+	Meta             *UserLoginMetadata
+	incoming         *libgm.IncomingRPCDispatcher
+	incomingLock     sync.Mutex
+	eventHandlerLock sync.Mutex
 
 	fullMediaRequests *exsync.Set[fullMediaRequestKey]
 
@@ -110,6 +113,21 @@ func (gc *GMClient) Connect(ctx context.Context) {
 		})
 		return
 	}
+	// Save the pre-upgrade catch-up boundary before incoming live messages can advance the database.
+	if err := gc.bootstrapForwardHistory(ctx); err != nil {
+		zerolog.Ctx(ctx).Error().Err(err).Msg("Failed to bootstrap forward history before connecting")
+		gc.UserLogin.BridgeState.Send(status.BridgeState{
+			StateEvent: status.StateUnknownError,
+			Error:      GMConnectionFailed,
+			Info:       map[string]any{"go_error": err.Error()},
+		})
+		return
+	}
+	if err := gc.startIncomingRPCs(ctx); err != nil {
+		gc.UserLogin.Log.Error().Err(err).Msg("Failed to start durable incoming RPC dispatcher")
+		gc.UserLogin.BridgeState.Send(status.BridgeState{StateEvent: status.StateUnknownError, Error: GMConnectionFailed})
+		return
+	}
 	err := gc.Client.FetchConfig(ctx)
 	if err != nil {
 		zerolog.Ctx(ctx).Err(err).Msg("Failed to fetch config")
@@ -160,15 +178,18 @@ func (gc *GMClient) Connect(ctx context.Context) {
 }
 
 func (gc *GMClient) Disconnect() {
+	// Cancel phone waiters before waiting for portal enqueue callbacks. A portal
+	// may currently be waiting for one of those responses during history fetch.
+	if cli := gc.Client; cli != nil {
+		cli.Disconnect()
+	}
+	gc.stopIncomingRPCs()
 	gc.longPollingError = errors.New("not connected")
 	gc.PhoneResponding = true
 	gc.batteryLow = false
 	gc.SwitchedToGoogleLogin = false
 	gc.ready = false
 	gc.browserInactiveType = ""
-	if cli := gc.Client; cli != nil {
-		cli.Disconnect()
-	}
 }
 
 func (gc *GMClient) ResetClient() {

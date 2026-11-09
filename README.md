@@ -10,6 +10,8 @@ All setup and usage instructions are located on [docs.mau.fi]. Some quick links:
   (or [with Docker](https://docs.mau.fi/bridges/general/docker-setup.html?bridge=gmessages))
 * Basic usage: [Authentication](https://docs.mau.fi/bridges/go/gmessages/authentication.html)
 
+Fork behavior: [Forward history pagination and recovery](FORWARD-HISTORY.md).
+
 ### Features & Roadmap
 [ROADMAP.md](ROADMAP.md) contains a general overview of what is supported by the bridge.
 
