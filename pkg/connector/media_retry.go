@@ -189,15 +189,19 @@ func (retry *mediaRetryEvent) ConvertEdit(ctx context.Context, portal *bridgev2.
 			return nil, errors.New("pending attachment sender differs from the original message sender")
 		}
 	}
+	return retry.convertPendingMediaParts(ctx, portal, intent, selected, message, len(existing), encoded)
+}
+
+func (retry *mediaRetryEvent) convertPendingMediaParts(ctx context.Context, portal *bridgev2.Portal, intent bridgev2.MatrixAPI, selected []pendingMediaPart, message *gmproto.Message, storedPartCount int, encoded string) (*bridgev2.ConvertedEdit, error) {
 	textPart, _ := getTextPart(message)
-	converted = &bridgev2.ConvertedEdit{}
+	converted := &bridgev2.ConvertedEdit{}
 	retry.converted = make(map[networkid.PartID]string)
 	retry.thumbnails = make(map[networkid.PartID]bool)
 	for _, part := range selected {
 		retry.selected = append(retry.selected, part.stored.PartID)
 	}
 	for _, part := range selected {
-		if err = ctx.Err(); err != nil {
+		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
 		content, mediaID, thumbnail, mediaError := retry.convert(ctx, portal, intent, part.media)
@@ -213,7 +217,7 @@ func (retry *mediaRetryEvent) ConvertEdit(ctx context.Context, portal *bridgev2.
 		stored := *part.stored
 		stored.Metadata = &metadata
 		convertedPart := &bridgev2.ConvertedMessagePart{ID: stored.PartID, Type: event.EventMessage, Content: content}
-		if len(existing) == 1 && textPart != nil {
+		if storedPartCount == 1 && textPart != nil {
 			convertedPart = bridgev2.MergeCaption(textPart, convertedPart)
 		}
 		extra := map[string]any(nil)

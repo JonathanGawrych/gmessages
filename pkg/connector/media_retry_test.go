@@ -147,6 +147,7 @@ type retryTestIntent struct {
 	original   *event.Event
 	reads      []id.EventID
 	edits      []*event.MessageEventContent
+	editExtras []map[string]any
 	replies    []string
 	failTarget id.EventID
 	readError  error
@@ -166,6 +167,7 @@ func (intent *retryTestIntent) SendMessage(_ context.Context, _ id.RoomID, _ eve
 			return nil, errors.New("fixture Matrix send failure")
 		}
 		intent.edits = append(intent.edits, message)
+		intent.editExtras = append(intent.editExtras, content.Raw)
 	}
 	return &mautrix.RespSendEvent{EventID: "$edit"}, nil
 }
@@ -259,19 +261,9 @@ func (fixture *retryFixture) enqueue(t *testing.T) string {
 	result := make(chan string, 1)
 	retry := &mediaRetryEvent{
 		client: fixture.client, key: fixture.portal.PortalKey, messageID: "fixture.message",
-		fetch: fixture.fetch,
-		reply: func(_ context.Context, message string) { result <- message },
-		convert: func(_ context.Context, _ *bridgev2.Portal, _ bridgev2.MatrixAPI, media *gmproto.MediaContent) (*event.MessageEventContent, string, bool, error) {
-			mediaID := media.MediaID
-			if mediaID == "" {
-				mediaID = media.ThumbnailMediaID
-			}
-			fixture.converted = append(fixture.converted, mediaID)
-			if mediaID == fixture.convertFailure {
-				return nil, mediaID, false, errors.New("fixture upload failure")
-			}
-			return &event.MessageEventContent{MsgType: event.MsgImage, Body: media.MediaName, URL: "mxc://example.invalid/fixture"}, mediaID, media.MediaID == "", nil
-		},
+		fetch:   fixture.fetch,
+		reply:   func(_ context.Context, message string) { result <- message },
+		convert: fixture.convertMedia,
 	}
 	if !retry.GetSender().ForceEditOrigSender {
 		t.Fatal("retry must use the original Matrix sender")
@@ -281,6 +273,18 @@ func (fixture *retryFixture) enqueue(t *testing.T) string {
 		t.Fatalf("enqueue retry: %+v", queued)
 	}
 	return <-result
+}
+
+func (fixture *retryFixture) convertMedia(_ context.Context, _ *bridgev2.Portal, _ bridgev2.MatrixAPI, media *gmproto.MediaContent) (*event.MessageEventContent, string, bool, error) {
+	mediaID := media.MediaID
+	if mediaID == "" {
+		mediaID = media.ThumbnailMediaID
+	}
+	fixture.converted = append(fixture.converted, mediaID)
+	if mediaID == fixture.convertFailure {
+		return nil, mediaID, false, errors.New("fixture upload failure")
+	}
+	return &event.MessageEventContent{MsgType: event.MsgImage, Body: media.MediaName, URL: "mxc://example.invalid/fixture"}, mediaID, media.MediaID == "", nil
 }
 
 func (fixture *retryFixture) parts(t *testing.T, ctx context.Context) []*database.Message {

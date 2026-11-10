@@ -49,6 +49,7 @@ func (gc *GMConnector) Init(bridge *bridgev2.Bridge) {
 	bridge.Commands.(*commands.Processor).AddHandler(commandRetryMedia)
 	bridge.Commands.(*commands.Processor).AddHandler(commandRequestMedia)
 	bridge.Commands.(*commands.Processor).AddHandler(commandInspectMedia)
+	bridge.Commands.(*commands.Processor).AddHandler(commandRefreshMedia)
 
 	util.BrowserDetailsMessage.OS = gc.Config.DeviceMeta.OS
 	browserVal, ok := gmproto.BrowserType_value[gc.Config.DeviceMeta.Browser]

@@ -119,3 +119,32 @@ presence of IDs/keys, plus inline data length and recognized PNG/JPEG/GIF dimens
 It never prints the IDs, keys,
 filenames or message text and makes no network or database calls. Pass the private
 value through standard input, not as a command-line argument or an exported log.
+
+## Refresh one pending attachment with fresh full-size data
+
+`!gm refresh-media <original attachment event ID>` (or a reply with
+`!gm refresh-media`) is an administrator-only command for a stored pending
+attachment whose fresh Google source already has a full media ID and decryption
+key. It selects exactly that attachment, unlike `retry-media`, which selects all
+pending parts of the stored message. An already-completed attachment is skipped
+before any history lookup or transfer.
+
+The command always reads the same bounded single page as `inspect-media`. It
+validates the account, portal, original Matrix event/sender, message ID,
+microsecond timestamp, exact attachment part ID, available text hash and original
+raw part count. Stored raw data may be stale or omitted: fresh source is explicitly
+selected by this command, not silently substituted by the older commands. A full
+media ID and key are required; thumbnail-only data and inline previews are not
+used. A mismatched/duplicate part, unavailable full ID or key, or failed lookup is
+an explicit failure with no transfer.
+
+Only the selected pending part is downloaded, uploaded and replaced through the
+original sender's native Matrix edit path. Merged captions are preserved, including
+one stored part produced from separate text and media source parts. The command
+makes no `GetFullSizeImage`, text-send, read-receipt or typing request. Other parts
+are untouched. Fresh protobuf data is kept in memory, not persisted into Matrix
+events or logs. The stored media ID and pending flag change only through the
+successful native replacement/save path, and the completion notice rereads the
+database to verify the result. Transfer, Matrix send and database save failures
+remain pending and can be retried. An accepted Matrix edit whose database save
+failed can be sent again, as with the existing native edit path.
