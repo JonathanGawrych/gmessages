@@ -38,7 +38,7 @@ func (gc *GMClient) fetchStoredMediaMessage(ctx context.Context, portal *bridgev
 	}
 	response, err := fetch(ctx, conversationID, mediaLookupPageSize, cursor)
 	if err != nil {
-		return nil, fmt.Errorf("saved raw message data is unavailable and the one-page lookup failed: %w", err)
+		return nil, fmt.Errorf("the one-page media lookup failed: %w", err)
 	}
 	if err = ctx.Err(); err != nil {
 		return nil, err
@@ -63,9 +63,9 @@ func (gc *GMClient) fetchStoredMediaMessage(ctx context.Context, portal *bridgev
 		found = candidate
 	}
 	if found == nil {
-		return nil, errors.New("saved raw message data is unavailable and the selected message was not in the single nearby 100-message page; no further pages were fetched and no attachment action was taken")
+		return nil, errors.New("the selected message was not in the single nearby 100-message page; no further pages were fetched and no attachment action was taken")
 	}
 	zerolog.Ctx(ctx).Info().Int("message_count", len(response.Messages)).Bool("has_anchor", anchor != nil).
-		Msg("Found stored media message in one history page after saved raw data was unavailable")
+		Msg("Found selected stored media message in one history page")
 	return found, nil
 }

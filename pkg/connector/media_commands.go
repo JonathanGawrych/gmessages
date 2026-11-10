@@ -47,19 +47,30 @@ func resolveMediaCommandTarget(ce *commands.Event) (*database.Message, *bridgev2
 	return stored, login
 }
 
-func (gc *GMClient) loadMediaMessage(ctx context.Context, portal *bridgev2.Portal, intent bridgev2.MatrixAPI, target networkid.MessageID, existing []*database.Message, fetch historyPageFetcher) (*database.Message, *gmproto.Message, string, error) {
+func loadOriginalMediaMessage(ctx context.Context, portal *bridgev2.Portal, intent bridgev2.MatrixAPI, target networkid.MessageID, existing []*database.Message) (*database.Message, *event.Event, error) {
 	var main *database.Message
 	for _, part := range existing {
 		if part.Room != portal.PortalKey || part.ID != target || part.MXID == "" || part.HasFakeMXID() {
-			return nil, nil, "", errors.New("stored message parts do not belong to this portal or have no original Matrix event")
+			return nil, nil, errors.New("stored message parts do not belong to this portal or have no original Matrix event")
 		}
 		if part.PartID == "" {
 			main = part
 		}
 	}
 	if main == nil {
-		return nil, nil, "", errors.New("the stored message has no original first part in this portal")
+		return nil, nil, errors.New("the stored message has no original first part in this portal")
 	}
+	original, err := intent.GetEvent(ctx, portal.MXID, main.MXID)
+	if err != nil {
+		return nil, nil, fmt.Errorf("cannot read the original Matrix event and saved raw data: %w", err)
+	}
+	if original.ID != main.MXID || original.RoomID != portal.MXID || original.Sender != main.SenderMXID || original.Type != event.EventMessage {
+		return nil, nil, errors.New("the original Matrix event does not match the stored message")
+	}
+	return main, original, nil
+}
+
+func (gc *GMClient) loadMediaMessage(ctx context.Context, portal *bridgev2.Portal, intent bridgev2.MatrixAPI, target networkid.MessageID, existing []*database.Message, fetch historyPageFetcher) (*database.Message, *gmproto.Message, string, error) {
 	messageID, err := gc.ParseMessageID(target)
 	if err != nil {
 		return nil, nil, "", err
@@ -68,12 +79,9 @@ func (gc *GMClient) loadMediaMessage(ctx context.Context, portal *bridgev2.Porta
 	if err != nil {
 		return nil, nil, "", err
 	}
-	original, err := intent.GetEvent(ctx, portal.MXID, main.MXID)
+	main, original, err := loadOriginalMediaMessage(ctx, portal, intent, target, existing)
 	if err != nil {
-		return nil, nil, "", fmt.Errorf("cannot read the original Matrix event and saved raw data: %w", err)
-	}
-	if original.ID != main.MXID || original.RoomID != portal.MXID || original.Sender != main.SenderMXID || original.Type != event.EventMessage {
-		return nil, nil, "", errors.New("the original Matrix event does not match the stored message")
+		return nil, nil, "", err
 	}
 	raw, present := original.Content.Raw[rawMessageDataKey]
 	encoded, isString := raw.(string)
@@ -89,13 +97,20 @@ func (gc *GMClient) loadMediaMessage(ctx context.Context, portal *bridgev2.Porta
 	if err != nil {
 		return nil, nil, "", err
 	}
+	if err = validateMediaMessageContent(main, message); err != nil {
+		return nil, nil, "", err
+	}
+	return main, message, encoded, nil
+}
+
+func validateMediaMessageContent(main *database.Message, message *gmproto.Message) error {
 	_, textHash := getTextPart(message)
 	metadata := main.Metadata.(*MessageMetadata)
 	if metadata.TextHash != "" && metadata.TextHash != textHash {
-		return nil, nil, "", errors.New("raw message text is stale; no attachment action was taken")
+		return errors.New("raw message text is stale; no attachment action was taken")
 	}
 	if metadata.GlobalPartCount > 0 && metadata.GlobalPartCount != len(message.MessageInfo) {
-		return nil, nil, "", errors.New("raw message part count is stale; no attachment action was taken")
+		return errors.New("raw message part count is stale; no attachment action was taken")
 	}
-	return main, message, encoded, err
+	return nil
 }

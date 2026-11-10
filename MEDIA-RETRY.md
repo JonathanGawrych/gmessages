@@ -100,6 +100,19 @@ ID to match the stored pending media ID. Neither command silently adopts new IDs
 
 ## Read-only saved-data inspection
 
+`!gm inspect-media <original attachment event ID>` (or replying to the attachment
+with `!gm inspect-media`) is an administrator-only, read-only diagnostic in the
+attachment's portal. It always uses the single-page lookup above, even when saved
+raw data exists, and validates the original Matrix event and exact stored/fetched
+attachment identity. It reports only booleans and counts: lookup success, stored
+pending state, stored media-ID presence, fresh full/thumbnail ID and key presence,
+inline byte count, and stored/fetched part counts. Failure reports
+`lookup_succeeded=false`, without including transport errors or private values.
+Neither a successful lookup nor `has_full_id=true` proves that a file can be
+downloaded. This command makes no full-size request, transfer, native update,
+Matrix edit, read receipt, typing action or metadata change. A bot notice is its
+only Matrix output. It queues behind earlier portal events.
+
 `go run ./cmd/gmessages-media-info` reads one saved base64 value from standard
 input. It prints only the protobuf container type, message count and per-attachment
 presence of IDs/keys, plus inline data length and recognized PNG/JPEG/GIF dimensions.
