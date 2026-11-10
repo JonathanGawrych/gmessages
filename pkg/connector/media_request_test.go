@@ -36,7 +36,7 @@ func prepareMediaRequestFixture(t *testing.T, ctx context.Context, fixture *retr
 	media.MediaID = ""
 	media.MediaData = []byte("fixture inline preview")
 	fixture.intent.original.Content.Raw[rawMessageDataKey] = encodeRetryFixture(t, fixture.message)
-	return &mediaRequestEvent{client: fixture.client, key: fixture.portal.PortalKey, messageID: "fixture.message", partID: "b", eventID: "$b"}
+	return &mediaRequestEvent{client: fixture.client, key: fixture.portal.PortalKey, messageID: "fixture.message", partID: "b", eventID: "$b", fetch: fixture.fetch}
 }
 
 func TestRequestMediaAcknowledgmentAndPortalOrder(t *testing.T) {
@@ -193,7 +193,7 @@ func TestMediaCommandsSynchronousFailureReporting(t *testing.T) {
 					fixture.login.Client = fixture.client
 					// No transport or session handler is installed: validation must fail before any phone call.
 					fixture.client.Client = &libgm.Client{AuthData: &libgm.AuthData{Browser: &gmproto.Device{}}}
-					fixture.intent.original.Content.Raw = nil
+					fixture.intent.original.Content.Raw[rawMessageDataKey] = "!"
 					target := "$a"
 					if command == commandRequestMedia {
 						target = "$b"
@@ -212,7 +212,7 @@ func TestMediaCommandsSynchronousFailureReporting(t *testing.T) {
 						if !strings.Contains(final, "could not be queued") || len(fixture.intent.reads) != 0 {
 							t.Fatalf("cancelled enqueue ran a callback or lacked failure notice: %v", fixture.intent.replies)
 						}
-					} else if !strings.Contains(final, "raw message data is unavailable") || strings.Contains(final, "could not be queued") {
+					} else if !strings.Contains(final, "not valid base64") || strings.Contains(final, "could not be queued") {
 						t.Fatalf("handled validation failure was reported as an enqueue failure: %v", fixture.intent.replies)
 					}
 					cancel()

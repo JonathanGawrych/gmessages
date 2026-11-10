@@ -44,13 +44,14 @@ func retryMediaCommand(ce *commands.Event) {
 	retry := &mediaRetryEvent{
 		client: client, key: stored.Room, messageID: stored.ID,
 		convert: client.convertGoogleMedia,
+		fetch:   client.Client.FetchMessages,
 		reply: func(ctx context.Context, message string) {
 			response := *ce
 			response.Ctx = ctx
 			response.Reply("%s", message)
 		},
 	}
-	ce.Reply("Queueing a pending-attachment retry behind earlier portal events. A completion notice will report the stored result.")
+	ce.Reply("Queueing a pending-attachment retry behind earlier portal events. If saved raw data is unavailable, one nearby history page will be read. A completion notice will report the stored result.")
 	result := ce.Bridge.QueueRemoteEvent(login, retry)
 	if (!result.Success || result.Ignored) && !retry.callbackRan.Load() {
 		ce.Reply("The attachment retry could not be queued. Check the bridge logs and retry after the portal is available.")
@@ -62,6 +63,7 @@ type mediaRetryEvent struct {
 	key         networkid.PortalKey
 	messageID   networkid.MessageID
 	convert     func(context.Context, *bridgev2.Portal, bridgev2.MatrixAPI, *gmproto.MediaContent) (*event.MessageEventContent, string, bool, error)
+	fetch       historyPageFetcher
 	reply       func(context.Context, string)
 	selected    []networkid.PartID
 	converted   map[networkid.PartID]string
@@ -85,7 +87,7 @@ func (retry *mediaRetryEvent) AddLogContext(log zerolog.Context) zerolog.Context
 // protobuf decoding alone cannot distinguish messages with overlapping fields.
 func decodeSavedMessage(encoded, messageID, conversationID string, timestamp int64) (*gmproto.Message, error) {
 	if encoded == "" || len(encoded) >= 8192 {
-		return nil, errors.New("saved raw message data is unavailable; the original first part must contain raw_debug_data before an attachment command can run")
+		return nil, errors.New("saved raw message data is empty or exceeds the 8191-character limit")
 	}
 	raw, err := base64.StdEncoding.DecodeString(encoded)
 	if err != nil {
@@ -174,7 +176,7 @@ func (retry *mediaRetryEvent) ConvertEdit(ctx context.Context, portal *bridgev2.
 	if !DBMessages(existing).HasPendingMedia() {
 		return nil, errors.New("this message has no pending attachments")
 	}
-	main, message, encoded, err := retry.client.loadSavedMediaMessage(ctx, portal, intent, retry.messageID, existing)
+	main, message, encoded, err := retry.client.loadMediaMessage(ctx, portal, intent, retry.messageID, existing, retry.fetch)
 	if err != nil {
 		return nil, err
 	}
@@ -187,14 +189,7 @@ func (retry *mediaRetryEvent) ConvertEdit(ctx context.Context, portal *bridgev2.
 			return nil, errors.New("pending attachment sender differs from the original message sender")
 		}
 	}
-	textPart, textHash := getTextPart(message)
-	mainMetadata := main.Metadata.(*MessageMetadata)
-	if mainMetadata.TextHash != "" && mainMetadata.TextHash != textHash {
-		return nil, errors.New("saved raw message text is stale; no attachments were retried")
-	}
-	if mainMetadata.GlobalPartCount > 0 && mainMetadata.GlobalPartCount != len(message.MessageInfo) {
-		return nil, errors.New("saved raw message part count is stale; no attachments were retried")
-	}
+	textPart, _ := getTextPart(message)
 	converted = &bridgev2.ConvertedEdit{}
 	retry.converted = make(map[networkid.PartID]string)
 	retry.thumbnails = make(map[networkid.PartID]bool)
@@ -222,7 +217,7 @@ func (retry *mediaRetryEvent) ConvertEdit(ctx context.Context, portal *bridgev2.
 			convertedPart = bridgev2.MergeCaption(textPart, convertedPart)
 		}
 		extra := map[string]any(nil)
-		if stored.PartID == "" {
+		if stored.PartID == "" && encoded != "" {
 			extra = map[string]any{rawMessageDataKey: encoded}
 		}
 		converted.ModifiedParts = append(converted.ModifiedParts, &bridgev2.ConvertedEditPart{

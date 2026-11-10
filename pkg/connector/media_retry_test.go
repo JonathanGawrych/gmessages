@@ -187,6 +187,7 @@ type retryFixture struct {
 	message        *gmproto.Message
 	converted      []string
 	convertFailure string
+	fetch          historyPageFetcher
 }
 
 func newRetryFixture(t *testing.T, ctx context.Context) *retryFixture {
@@ -233,6 +234,9 @@ func newRetryFixture(t *testing.T, ctx context.Context) *retryFixture {
 	}
 	client := &GMClient{UserLogin: login, Meta: &UserLoginMetadata{IDPrefix: "fixture"}}
 	fixture := &retryFixture{bridge: bridge, portal: portal, login: login, client: client, intent: intent, message: message}
+	fixture.fetch = func(context.Context, string, int64, *gmproto.Cursor) (*gmproto.ListMessagesResponse, error) {
+		return &gmproto.ListMessagesResponse{}, nil
+	}
 	for index, part := range message.MessageInfo {
 		partID := networkid.PartID(part.GetActionMessageID())
 		if index == 0 {
@@ -255,6 +259,7 @@ func (fixture *retryFixture) enqueue(t *testing.T) string {
 	result := make(chan string, 1)
 	retry := &mediaRetryEvent{
 		client: fixture.client, key: fixture.portal.PortalKey, messageID: "fixture.message",
+		fetch: fixture.fetch,
 		reply: func(_ context.Context, message string) { result <- message },
 		convert: func(_ context.Context, _ *bridgev2.Portal, _ bridgev2.MatrixAPI, media *gmproto.MediaContent) (*event.MessageEventContent, string, bool, error) {
 			mediaID := media.MediaID

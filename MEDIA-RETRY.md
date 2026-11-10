@@ -16,8 +16,9 @@ not downloaded, uploaded or edited. The first stored part supplies the saved
 `fi.mau.gmessages.raw_debug_data` protobuf, even if the specified event is another
 attachment. Account, conversation, message, timestamp, part IDs and known media
 IDs must match the stored records. Available text hashes and part counts are also
-checked for stale data. Missing, invalid or mismatched raw data is an explicit
-error: the command does not fetch message history or guess a download key.
+checked for stale data. Invalid or mismatched saved raw data is an explicit error.
+When the field is absent or an empty string, a bounded read-only lookup can supply
+the source message, as described below. Download keys are never guessed.
 
 The command preserves the original message/part IDs, sender, timestamp, merged
 caption and unrelated message metadata. Each successful transfer becomes a native
@@ -48,8 +49,8 @@ that attachment's portal, or reply to that attachment notice with `!gm request-m
 It selects exactly one stored pending attachment, not every part of the message.
 Successful attachments, text parts and parts with saved media IDs are rejected.
 The first stored part's raw protobuf must match the account, conversation,
-message, timestamp and attachment part ID. A missing or stale raw value is an
-explicit error, with no history fetch.
+message, timestamp and attachment part ID. An absent or empty raw field uses the
+same bounded lookup; invalid or stale saved data remains an explicit error.
 
 The command enters the same serialized portal queue and calls the existing paired
 client's `GetFullSizeImage(messageID, actionMessageID)` once. It does not send text,
@@ -68,6 +69,34 @@ decoding those bytes. This command requests full-size media and does not convert
 inline previews or claim that the phone will still have the full-size file.
 Request failure leaves pending state unchanged. An administrator may explicitly
 repeat the command later; there is no automatic request loop or persisted command.
+
+## One-page lookup when saved raw data was omitted
+
+The normal converter omits `raw_debug_data` when its base64 representation would
+contain 8192 or more characters. If the original first Matrix event has no such
+field, or its value is an empty string, either command reads at most one page of
+100 messages using the already-paired client's read-only `FetchMessages` call.
+The original Matrix event's room, event ID and sender are still checked first.
+A present non-string, malformed, oversized or mismatched raw value prevents this
+lookup and remains an error.
+
+The cursor uses the nearest actual stored non-fake message in the same portal
+whose timestamp is in a strictly later millisecond. If there is no such message,
+the command reads only the latest page. It never invents a cursor or follows the
+returned cursor. A deleted target, a large gap between stored messages, or many
+messages with equal timestamps can put the target outside that page. In that
+case the command reports an explicit failure without scanning further history.
+Exactly one returned message must match the stored account, conversation,
+message ID and microsecond timestamp. Part identity, saved media IDs, available
+text hashes and part counts retain their validation. Only that message enters
+the selected attachment command; other page messages are not converted or sent.
+Fetched source data stays in memory and is not copied into a Matrix event or log.
+
+`request-media` still requests only one no-ID attachment. If fetched data already
+has a media ID while the stored pending part has none, it reports that mismatch
+and makes no full-size request, transfer, edit or metadata change. Reconciling that
+state is not part of this command. `retry-media` still requires the fetched media
+ID to match the stored pending media ID. Neither command silently adopts new IDs.
 
 ## Read-only saved-data inspection
 

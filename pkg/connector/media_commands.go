@@ -47,7 +47,7 @@ func resolveMediaCommandTarget(ce *commands.Event) (*database.Message, *bridgev2
 	return stored, login
 }
 
-func (gc *GMClient) loadSavedMediaMessage(ctx context.Context, portal *bridgev2.Portal, intent bridgev2.MatrixAPI, target networkid.MessageID, existing []*database.Message) (*database.Message, *gmproto.Message, string, error) {
+func (gc *GMClient) loadMediaMessage(ctx context.Context, portal *bridgev2.Portal, intent bridgev2.MatrixAPI, target networkid.MessageID, existing []*database.Message, fetch historyPageFetcher) (*database.Message, *gmproto.Message, string, error) {
 	var main *database.Message
 	for _, part := range existing {
 		if part.Room != portal.PortalKey || part.ID != target || part.MXID == "" || part.HasFakeMXID() {
@@ -75,7 +75,27 @@ func (gc *GMClient) loadSavedMediaMessage(ctx context.Context, portal *bridgev2.
 	if original.ID != main.MXID || original.RoomID != portal.MXID || original.Sender != main.SenderMXID || original.Type != event.EventMessage {
 		return nil, nil, "", errors.New("the original Matrix event does not match the stored message")
 	}
-	encoded, _ := original.Content.Raw[rawMessageDataKey].(string)
-	message, err := decodeSavedMessage(encoded, messageID, conversationID, main.Timestamp.UnixMicro())
+	raw, present := original.Content.Raw[rawMessageDataKey]
+	encoded, isString := raw.(string)
+	if present && !isString {
+		return nil, nil, "", errors.New("saved raw message data is not a string; no history lookup was made")
+	}
+	var message *gmproto.Message
+	if encoded == "" {
+		message, err = gc.fetchStoredMediaMessage(ctx, portal, main, messageID, conversationID, fetch)
+	} else {
+		message, err = decodeSavedMessage(encoded, messageID, conversationID, main.Timestamp.UnixMicro())
+	}
+	if err != nil {
+		return nil, nil, "", err
+	}
+	_, textHash := getTextPart(message)
+	metadata := main.Metadata.(*MessageMetadata)
+	if metadata.TextHash != "" && metadata.TextHash != textHash {
+		return nil, nil, "", errors.New("raw message text is stale; no attachment action was taken")
+	}
+	if metadata.GlobalPartCount > 0 && metadata.GlobalPartCount != len(message.MessageInfo) {
+		return nil, nil, "", errors.New("raw message part count is stale; no attachment action was taken")
+	}
 	return main, message, encoded, err
 }

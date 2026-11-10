@@ -34,13 +34,14 @@ func requestMediaCommand(ce *commands.Event) {
 	request := &mediaRequestEvent{
 		client: client, key: stored.Room, messageID: stored.ID, partID: stored.PartID, eventID: stored.MXID,
 		request: client.Client.GetFullSizeImage,
+		fetch:   client.Client.FetchMessages,
 		reply: func(ctx context.Context, message string) {
 			response := *ce
 			response.Ctx = ctx
 			response.Reply("%s", message)
 		},
 	}
-	ce.Reply("Queueing a request for exactly this pending attachment. Acknowledgment does not confirm media recovery.")
+	ce.Reply("Queueing a request for exactly this pending attachment. If saved raw data is unavailable, one nearby history page will be read. Acknowledgment does not confirm media recovery.")
 	result := ce.Bridge.QueueRemoteEvent(login, request)
 	if (!result.Success || result.Ignored) && !request.callbackRan.Load() {
 		ce.Reply("The attachment request could not be queued. Check the bridge logs and retry after the portal is available.")
@@ -54,6 +55,7 @@ type mediaRequestEvent struct {
 	partID      networkid.PartID
 	eventID     id.EventID
 	request     func(context.Context, string, string) (*gmproto.GetFullSizeImageResponse, error)
+	fetch       historyPageFetcher
 	reply       func(context.Context, string)
 	callbackRan atomic.Bool
 }
@@ -102,7 +104,7 @@ func (request *mediaRequestEvent) requestStoredMedia(ctx context.Context, portal
 	if metadata.MediaID != "" {
 		return errors.New("this attachment already has a saved media ID; use retry-media instead")
 	}
-	main, message, _, err := request.client.loadSavedMediaMessage(ctx, portal, portal.Bridge.Bot, request.messageID, existing)
+	main, message, _, err := request.client.loadMediaMessage(ctx, portal, portal.Bridge.Bot, request.messageID, existing, request.fetch)
 	if err != nil {
 		return err
 	}
@@ -124,7 +126,7 @@ func (request *mediaRequestEvent) requestStoredMedia(ctx context.Context, portal
 		return errors.New("saved raw data does not contain the selected attachment; it may be stale")
 	}
 	if media.MediaID != "" || media.ThumbnailMediaID != "" {
-		return errors.New("saved raw data already has a media ID but the pending record does not match; no phone request was made")
+		return errors.New("raw attachment data already has a media ID but the stored pending part has none; no full-size request, transfer or edit was made, and this command does not reconcile that state")
 	}
 	if err = ctx.Err(); err != nil {
 		return err
